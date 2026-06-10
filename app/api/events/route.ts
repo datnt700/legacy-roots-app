@@ -3,35 +3,32 @@ import { validateEventPayload, type EventPayload } from "@/features/events/valid
 import type { MediaRow } from "@/features/media/types";
 import { getSupabase } from "@/lib/supabase";
 import { withDisplayUrl } from "@/lib/supabase/storage";
+import { getDefaultFamilyId } from "@/lib/family";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
     const supabase = getSupabase();
+    const familyId = await getDefaultFamilyId();
     const { data: events, error: eventsError } = await supabase
       .from("events")
-      .select("id,title,description,timeline_year,created_at")
+      .select("id,title,description,timeline_year,created_at,family_id")
+      .eq("family_id", familyId)
       .order("timeline_year", { ascending: true });
 
     if (eventsError) {
       return NextResponse.json({ error: eventsError.message }, { status: 500 });
     }
 
-    const { data: links, error: linksError } = await supabase
-      .from("event_media")
-      .select("event_id,media_id");
-
-    if (linksError) {
-      return NextResponse.json({ error: linksError.message }, { status: 500 });
-    }
-
-    const mediaIds = [...new Set((links ?? []).map((link) => link.media_id))];
-    const { data: media, error: mediaError } = mediaIds.length
+    const eventIds = (events ?? []).map((event) => String(event.id));
+    const { data: media, error: mediaError } = eventIds.length
       ? await supabase
           .from("media")
-          .select("id,file_name,file_url,file_type,created_at")
-          .in("id", mediaIds)
+          .select("id,file_name,file_url,file_type,created_at,family_id,entity_type,entity_id")
+          .eq("family_id", familyId)
+          .eq("entity_type", "event")
+          .in("entity_id", eventIds)
       : { data: [], error: null };
 
     if (mediaError) {
@@ -41,13 +38,9 @@ export async function GET() {
     const signedMedia = await Promise.all(
       ((media ?? []) as MediaRow[]).map((item) => withDisplayUrl(supabase, item)),
     );
-    const mediaById = new Map(signedMedia.map((item) => [item.id, item]));
     const data = (events ?? []).map((event) => ({
       ...event,
-      media: (links ?? [])
-        .filter((link) => link.event_id === event.id)
-        .map((link) => mediaById.get(link.media_id))
-        .filter(Boolean),
+      media: signedMedia.filter((item) => item.entity_id === String(event.id)),
     }));
 
     return NextResponse.json({ data });
@@ -65,6 +58,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const supabase = getSupabase();
+    const familyId = await getDefaultFamilyId();
     const payload = (await request.json()) as EventPayload;
     const validated = validateEventPayload(payload);
 
@@ -74,8 +68,8 @@ export async function POST(request: Request) {
 
     const { data, error } = await supabase
       .from("events")
-      .insert(validated.data)
-      .select("id,title,description,timeline_year,created_at")
+      .insert({ ...validated.data, family_id: familyId })
+      .select("id,title,description,timeline_year,created_at,family_id")
       .single();
 
     if (error) {

@@ -27,7 +27,7 @@ export async function PATCH(
     .from("media")
     .update(validated.data)
     .eq("id", id)
-    .select("id,file_name,file_url,file_type,created_at")
+    .select("id,file_name,file_url,file_type,created_at,family_id,entity_type,entity_id")
     .single();
 
   if (error) {
@@ -47,15 +47,6 @@ export async function DELETE(
 
   if (!id) {
     return NextResponse.json({ error: "Invalid media id." }, { status: 400 });
-  }
-
-  const { error: linkError } = await supabase
-    .from("event_media")
-    .delete()
-    .eq("media_id", id);
-
-  if (linkError) {
-    return NextResponse.json({ error: linkError.message }, { status: 500 });
   }
 
   const { error } = await supabase.from("media").delete().eq("id", id);

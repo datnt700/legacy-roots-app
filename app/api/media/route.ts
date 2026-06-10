@@ -8,7 +8,7 @@ export async function GET() {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("media")
-    .select("id,file_name,file_url,file_type,created_at")
+    .select("id,file_name,file_url,file_type,created_at,family_id,entity_type,entity_id")
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -30,7 +30,7 @@ export async function POST(request: Request) {
   const { data, error } = await supabase
     .from("media")
     .insert(validated.data)
-    .select("id,file_name,file_url,file_type,created_at")
+    .select("id,file_name,file_url,file_type,created_at,family_id,entity_type,entity_id")
     .single();
 
   if (error) {

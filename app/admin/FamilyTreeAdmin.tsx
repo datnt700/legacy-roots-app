@@ -30,6 +30,7 @@ import {
 type NewMemberForm = {
   name: string;
   relationship: string;
+  gender: NonNullable<FamilyMember["gender"]> | "";
   image: string;
   generationId: string;
   relationType: NonNullable<FamilyMember["relationType"]>;
@@ -39,6 +40,7 @@ type NewMemberForm = {
 const emptyNewMemberForm: NewMemberForm = {
   name: "",
   relationship: "",
+  gender: "",
   image: "",
   generationId: "",
   relationType: "relative",
@@ -57,12 +59,29 @@ function moveItem<T>(items: T[], index: number, direction: -1 | 1) {
   return next;
 }
 
+function withSortOrder<T extends { sortOrder?: number }>(items: T[]) {
+  return items.map((item, index) => ({
+    ...item,
+    sortOrder: index + 1,
+  }));
+}
+
+function countRelationships(tree: FamilyTreeData) {
+  return tree.generations.reduce(
+    (total, generation) =>
+      total +
+      generation.members.filter((member) => member.relatedMemberId).length,
+    0,
+  );
+}
+
 export default function FamilyTreeAdmin() {
   const router = useRouter();
   const [tree, setTree] = useState<FamilyTreeData>(defaultFamilyTree);
   const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [isTreeLoaded, setIsTreeLoaded] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [newMember, setNewMember] = useState<NewMemberForm>(emptyNewMemberForm);
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
@@ -147,7 +166,9 @@ export default function FamilyTreeAdmin() {
     setNewMember((current) => {
       if (
         current.generationId &&
-        tree.generations.some((generation) => generation.id === current.generationId)
+        tree.generations.some(
+          (generation) => generation.id === current.generationId,
+        )
       ) {
         return current;
       }
@@ -159,56 +180,77 @@ export default function FamilyTreeAdmin() {
     });
   }, [tree.generations]);
 
-  useEffect(() => {
-    if (!isTreeLoaded || !isDirty) {
-      return;
-    }
-
-    window.localStorage.setItem(FAMILY_TREE_STORAGE_KEY, JSON.stringify(tree));
-    setMessage("Saving to Supabase...");
-
-    const timeoutId = window.setTimeout(() => {
-      getBrowserSupabase()
-        .auth.getSession()
-        .then(({ data }) => {
-          const accessToken = data.session?.access_token;
-
-          if (!accessToken) {
-            throw new Error("Admin session expired. Please sign in again.");
-          }
-
-          return saveFamilyTree(tree, accessToken);
-        })
-        .then((savedTree) => {
-          setTree(savedTree);
-          window.localStorage.setItem(
-            FAMILY_TREE_STORAGE_KEY,
-            JSON.stringify(savedTree),
-          );
-          window.dispatchEvent(new Event(FAMILY_TREE_UPDATED_EVENT));
-          setIsDirty(false);
-          setMessage("Saved to Supabase.");
-        })
-        .catch((error) => {
-          setMessage(
-            error instanceof Error
-              ? `Could not save to Supabase: ${error.message}`
-              : "Could not save to Supabase.",
-          );
-        });
-    }, 700);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [isDirty, isTreeLoaded, tree]);
-
   function updateTree(updater: (current: FamilyTreeData) => FamilyTreeData) {
     setTree((current) => updater(current));
     setIsDirty(true);
-    setMessage("Unsaved changes...");
+    setMessage("Unsaved changes. Click Save changes to persist.");
+  }
+
+  async function handleSaveChanges() {
+    if (!isTreeLoaded || !isDirty || isSaving) {
+      return;
+    }
+
+    setIsSaving(true);
+    setMessage("Saving to Supabase...");
+
+    try {
+      const { data } = await getBrowserSupabase().auth.getSession();
+      const accessToken = data.session?.access_token;
+
+      if (!accessToken) {
+        throw new Error("Admin session expired. Please sign in again.");
+      }
+
+      const savedTree = await saveFamilyTree(tree, accessToken);
+      setTree(savedTree);
+      window.localStorage.setItem(
+        FAMILY_TREE_STORAGE_KEY,
+        JSON.stringify(savedTree),
+      );
+      setIsDirty(false);
+      window.dispatchEvent(new Event(FAMILY_TREE_UPDATED_EVENT));
+      const relationshipCount = countRelationships(savedTree);
+      setMessage(
+        relationshipCount
+          ? `Saved to Supabase. ${relationshipCount} relationships saved.`
+          : "Saved to Supabase. No relationships saved because no Related to value is selected.",
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Could not save to Supabase: ${error.message}`
+          : "Could not save to Supabase.",
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDiscardChanges() {
+    setMessage("Reloading from Supabase...");
+
+    try {
+      const data = await fetchFamilyTree();
+      setTree(data);
+      window.localStorage.setItem(
+        FAMILY_TREE_STORAGE_KEY,
+        JSON.stringify(data),
+      );
+      setIsDirty(false);
+      setMessage("Changes discarded.");
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Could not reload from Supabase: ${error.message}`
+          : "Could not reload from Supabase.",
+      );
+    }
   }
 
   function updateGeneration(generationId: string, label: string) {
     updateTree((current) => ({
+      ...current,
       generations: current.generations.map((generation) =>
         generation.id === generationId ? { ...generation, label } : generation,
       ),
@@ -217,33 +259,46 @@ export default function FamilyTreeAdmin() {
 
   function addGeneration() {
     updateTree((current) => ({
-      generations: [
+      ...current,
+      generations: withSortOrder([
         ...current.generations,
         {
           id: createFamilyId("generation"),
           label: `GENERATION ${current.generations.length + 1}`,
           members: [],
         },
-      ],
+      ]),
     }));
   }
 
   function removeGeneration(generationId: string) {
     updateTree((current) => ({
-      generations: current.generations.filter(
-        (generation) => generation.id !== generationId,
+      ...current,
+      rootPersonId: current.generations
+        .find((generation) => generation.id === generationId)
+        ?.members.some((member) => member.id === current.rootPersonId)
+        ? null
+        : current.rootPersonId,
+      generations: withSortOrder(
+        current.generations.filter(
+          (generation) => generation.id !== generationId,
+        ),
       ),
     }));
   }
 
   function moveGeneration(index: number, direction: -1 | 1) {
     updateTree((current) => ({
-      generations: moveItem(current.generations, index, direction),
+      ...current,
+      generations: withSortOrder(
+        moveItem(current.generations, index, direction),
+      ),
     }));
   }
 
   function addMember(generationId: string) {
     updateTree((current) => ({
+      ...current,
       generations: current.generations.map((generation) =>
         generation.id === generationId
           ? {
@@ -254,7 +309,9 @@ export default function FamilyTreeAdmin() {
                   id: createFamilyId("member"),
                   name: "New Member",
                   role: "Member",
+                  gender: null,
                   relationship: "Member",
+                  sortOrder: generation.members.length + 1,
                 },
               ],
             }
@@ -275,6 +332,7 @@ export default function FamilyTreeAdmin() {
     }
 
     updateTree((current) => ({
+      ...current,
       generations: current.generations.map((generation) =>
         generation.id === newMember.generationId
           ? {
@@ -285,10 +343,12 @@ export default function FamilyTreeAdmin() {
                   id: createFamilyId("member"),
                   name,
                   role: relationship,
+                  gender: newMember.gender || null,
                   relationship,
                   relationType: newMember.relationType,
                   relatedMemberId: newMember.relatedMemberId || undefined,
                   image: newMember.image.trim() || undefined,
+                  sortOrder: generation.members.length + 1,
                 },
               ],
             }
@@ -307,6 +367,7 @@ export default function FamilyTreeAdmin() {
     patch: Partial<FamilyMember>,
   ) {
     updateTree((current) => ({
+      ...current,
       generations: current.generations.map((generation) =>
         generation.id === generationId
           ? {
@@ -320,14 +381,24 @@ export default function FamilyTreeAdmin() {
     }));
   }
 
+  function updateRootPerson(rootPersonId: string) {
+    updateTree((current) => ({
+      ...current,
+      rootPersonId: rootPersonId || null,
+    }));
+  }
+
   function removeMember(generationId: string, memberId: string) {
     updateTree((current) => ({
+      ...current,
+      rootPersonId:
+        current.rootPersonId === memberId ? null : current.rootPersonId,
       generations: current.generations.map((generation) =>
         generation.id === generationId
           ? {
               ...generation,
-              members: generation.members.filter(
-                (member) => member.id !== memberId,
+              members: withSortOrder(
+                generation.members.filter((member) => member.id !== memberId),
               ),
             }
           : generation,
@@ -335,13 +406,20 @@ export default function FamilyTreeAdmin() {
     }));
   }
 
-  function moveMember(generationId: string, memberIndex: number, direction: -1 | 1) {
+  function moveMember(
+    generationId: string,
+    memberIndex: number,
+    direction: -1 | 1,
+  ) {
     updateTree((current) => ({
+      ...current,
       generations: current.generations.map((generation) =>
         generation.id === generationId
           ? {
               ...generation,
-              members: moveItem(generation.members, memberIndex, direction),
+              members: withSortOrder(
+                moveItem(generation.members, memberIndex, direction),
+              ),
             }
           : generation,
       ),
@@ -361,25 +439,30 @@ export default function FamilyTreeAdmin() {
       const sourceGeneration = current.generations.find(
         (generation) => generation.id === sourceGenerationId,
       );
-      const member = sourceGeneration?.members.find((item) => item.id === memberId);
+      const member = sourceGeneration?.members.find(
+        (item) => item.id === memberId,
+      );
 
       if (!member) {
         return current;
       }
 
       return {
+        ...current,
         generations: current.generations.map((generation) => {
           if (generation.id === sourceGenerationId) {
             return {
               ...generation,
-              members: generation.members.filter((item) => item.id !== memberId),
+              members: withSortOrder(
+                generation.members.filter((item) => item.id !== memberId),
+              ),
             };
           }
 
           if (generation.id === targetGenerationId) {
             return {
               ...generation,
-              members: [...generation.members, member],
+              members: withSortOrder([...generation.members, member]),
             };
           }
 
@@ -422,7 +505,9 @@ export default function FamilyTreeAdmin() {
       setNewMember((current) => ({ ...current, image: fileUrl }));
       setMessage("Photo uploaded.");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Photo upload failed.");
+      setMessage(
+        error instanceof Error ? error.message : "Photo upload failed.",
+      );
     } finally {
       setIsUploadingPhoto(false);
     }
@@ -444,7 +529,9 @@ export default function FamilyTreeAdmin() {
       updateMember(generationId, memberId, { image: fileUrl });
       setMessage("Photo uploaded.");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Photo upload failed.");
+      setMessage(
+        error instanceof Error ? error.message : "Photo upload failed.",
+      );
     }
   }
 
@@ -508,11 +595,29 @@ export default function FamilyTreeAdmin() {
                 Create, edit, delete, and connect family relationships.
               </p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleSaveChanges}
+                disabled={!isDirty || isSaving}
+                className="inline-flex h-10 items-center gap-2 rounded-full bg-gold px-4 text-sm font-semibold text-background disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Save className="h-4 w-4" />
+                {isSaving ? "Saving..." : "Save changes"}
+              </button>
+              <button
+                type="button"
+                onClick={handleDiscardChanges}
+                disabled={!isDirty || isSaving}
+                className="inline-flex h-10 items-center gap-2 rounded-full border border-border bg-card px-4 text-sm text-muted-foreground hover:text-gold disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Discard
+              </button>
               <button
                 type="button"
                 onClick={addGeneration}
-                className="inline-flex h-10 items-center gap-2 rounded-full bg-gold px-4 text-sm font-semibold text-background"
+                disabled={isSaving}
+                className="inline-flex h-10 items-center gap-2 rounded-full border border-border bg-card px-4 text-sm text-muted-foreground hover:text-gold disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Plus className="h-4 w-4" />
                 Generation
@@ -520,9 +625,10 @@ export default function FamilyTreeAdmin() {
               <button
                 type="button"
                 onClick={() => updateTree(() => defaultFamilyTree)}
-                className="inline-flex h-10 items-center gap-2 rounded-full border border-border bg-card px-4 text-sm text-muted-foreground hover:text-gold"
+                disabled={isSaving}
+                className="inline-flex h-10 items-center gap-2 rounded-full border border-border bg-card px-4 text-sm text-muted-foreground hover:text-gold disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Reset
+                Reset draft
               </button>
             </div>
           </div>
@@ -531,8 +637,25 @@ export default function FamilyTreeAdmin() {
             <div className="rounded-[8px] border border-gold/20 bg-gold/10 px-4 py-3 text-sm text-gold">
               <Save className="mr-2 inline h-4 w-4" />
               {message}
+              {isDirty && !isSaving ? " Changes are not saved yet." : ""}
             </div>
           )}
+
+          <label className="block rounded-[8px] border border-border bg-card/70 p-4 text-xs uppercase tracking-[0.16em] text-muted-foreground">
+            Root person
+            <select
+              value={tree.rootPersonId ?? ""}
+              onChange={(event) => updateRootPerson(event.target.value)}
+              className="mt-2 h-10 w-full rounded-[6px] border border-border bg-background px-3 text-sm normal-case tracking-normal text-foreground outline-none focus:border-gold"
+            >
+              <option value="">Auto: first person by generation order</option>
+              {allMembers.map((member) => (
+                <option key={member.id} value={member.id}>
+                  {member.name} - {member.generationLabel}
+                </option>
+              ))}
+            </select>
+          </label>
 
           <form
             onSubmit={createMemberFromForm}
@@ -609,6 +732,25 @@ export default function FamilyTreeAdmin() {
               </label>
 
               <label className="block text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                Gender
+                <select
+                  value={newMember.gender}
+                  onChange={(event) =>
+                    setNewMember((current) => ({
+                      ...current,
+                      gender: event.target.value as NewMemberForm["gender"],
+                    }))
+                  }
+                  className="mt-1 h-10 w-full rounded-[6px] border border-border bg-background px-3 text-sm normal-case tracking-normal text-foreground outline-none focus:border-gold"
+                >
+                  <option value="">Not specified</option>
+                  <option value="male">Male</option>
+                  <option value="female">Female</option>
+                  <option value="other">Other</option>
+                </select>
+              </label>
+
+              <label className="block text-xs uppercase tracking-[0.16em] text-muted-foreground">
                 Photo URL
                 <input
                   value={newMember.image}
@@ -639,15 +781,20 @@ export default function FamilyTreeAdmin() {
               <label className="block text-xs uppercase tracking-[0.16em] text-muted-foreground">
                 Relation type
                 <select
-                  value={newMember.relationType}
+                  value={
+                    newMember.relatedMemberId ? newMember.relationType : ""
+                  }
+                  disabled={!newMember.relatedMemberId}
                   onChange={(event) =>
                     setNewMember((current) => ({
                       ...current,
-                      relationType: event.target.value as NewMemberForm["relationType"],
+                      relationType: event.target
+                        .value as NewMemberForm["relationType"],
                     }))
                   }
-                  className="mt-1 h-10 w-full rounded-[6px] border border-border bg-background px-3 text-sm normal-case tracking-normal text-foreground outline-none focus:border-gold"
+                  className="mt-1 h-10 w-full rounded-[6px] border border-border bg-background px-3 text-sm normal-case tracking-normal text-foreground outline-none focus:border-gold disabled:cursor-not-allowed disabled:opacity-50"
                 >
+                  <option value="">Select related person first</option>
                   <option value="relative">Relative of</option>
                   <option value="parent">Parent of</option>
                   <option value="child">Child of</option>
@@ -664,6 +811,9 @@ export default function FamilyTreeAdmin() {
                     setNewMember((current) => ({
                       ...current,
                       relatedMemberId: event.target.value,
+                      relationType: event.target.value
+                        ? current.relationType || "relative"
+                        : "relative",
                     }))
                   }
                   className="mt-1 h-10 w-full rounded-[6px] border border-border bg-background px-3 text-sm normal-case tracking-normal text-foreground outline-none focus:border-gold"
@@ -742,9 +892,12 @@ export default function FamilyTreeAdmin() {
                   {generation.members.map((member, memberIndex) => (
                     <div
                       key={member.id}
-                      className="grid gap-3 rounded-[8px] border border-border bg-background/70 p-3 md:grid-cols-2 xl:grid-cols-[1fr_0.9fr_1.1fr_0.85fr_1fr_auto]"
+                      className="grid gap-3 rounded-[8px] border border-border bg-background/70 p-3
+                      grid-cols-1
+                      md:grid-cols-[3fr_2fr_120px]
+                "
                     >
-                      <label className="block text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                      <label className="xl:col-span-3  block text-xs uppercase tracking-[0.16em] text-muted-foreground">
                         Name
                         <input
                           value={member.name}
@@ -756,7 +909,7 @@ export default function FamilyTreeAdmin() {
                           className="mt-1 w-full rounded-[6px] border border-border bg-card px-3 py-2 text-sm normal-case tracking-normal text-foreground outline-none focus:border-gold"
                         />
                       </label>
-                      <label className="block text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                      <label className="xl:col-span-2 block text-xs uppercase tracking-[0.16em] text-muted-foreground">
                         Relationship
                         <input
                           value={member.relationship || member.role}
@@ -770,6 +923,25 @@ export default function FamilyTreeAdmin() {
                         />
                       </label>
                       <label className="block text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                        Gender
+                        <select
+                          value={member.gender ?? ""}
+                          onChange={(event) =>
+                            updateMember(generation.id, member.id, {
+                              gender:
+                                (event.target
+                                  .value as FamilyMember["gender"]) || null,
+                            })
+                          }
+                          className="mt-1 h-10 w-full rounded-[6px] border border-border bg-card px-2 text-sm normal-case tracking-normal text-foreground outline-none focus:border-gold"
+                        >
+                          <option value="">Not specified</option>
+                          <option value="male">Male</option>
+                          <option value="female">Female</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </label>
+                      <label className="xl:col-span-3 block text-xs uppercase tracking-[0.16em] text-muted-foreground">
                         Photo URL
                         <input
                           value={member.image ?? ""}
@@ -783,48 +955,54 @@ export default function FamilyTreeAdmin() {
                         />
                       </label>
 
-                        <label className="block text-xs uppercase tracking-[0.16em] text-muted-foreground">
-                          Upload
-                          <span className="mt-1 flex gap-2">
-                            <input
-                              type="file"
-                              accept="image/*"
-                              onChange={(event) =>
-                                uploadExistingMemberPhoto(
-                                  generation.id,
-                                  member.id,
-                                  event.target.files?.[0],
-                                )
-                              }
-                              className="min-w-0 flex-1 rounded-[6px] border border-border bg-card px-2 py-2 text-xs normal-case tracking-normal text-foreground file:mr-2 file:rounded-full file:border-0 file:bg-gold file:px-2 file:py-1 file:text-xs file:font-semibold file:text-background"
-                            />
-                            <button
-                              type="button"
-                              onClick={() =>
-                                updateMember(generation.id, member.id, {
-                                  image: undefined,
-                                })
-                              }
-                              disabled={!member.image}
-                              className="rounded-[6px] border border-border bg-card px-2 text-xs normal-case tracking-normal text-muted-foreground hover:text-gold disabled:cursor-not-allowed disabled:opacity-40"
-                            >
-                              Remove
-                            </button>
-                          </span>
-                        </label>
+                      <label className="md:col-span-3 block text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                        Upload
+                        <span className="mt-1 flex gap-2">
+                          <input
+                            type="file"
+                            accept="image/*"
+                            onChange={(event) =>
+                              uploadExistingMemberPhoto(
+                                generation.id,
+                                member.id,
+                                event.target.files?.[0],
+                              )
+                            }
+                            className="min-w-0 flex-1 rounded-[6px] border border-border bg-card px-2 py-2 text-xs normal-case tracking-normal text-foreground file:mr-2 file:rounded-full file:border-0 file:bg-gold file:px-2 file:py-1 file:text-xs file:font-semibold file:text-background"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateMember(generation.id, member.id, {
+                                image: undefined,
+                              })
+                            }
+                            disabled={!member.image}
+                            className="rounded-[6px] border border-border bg-card px-2 text-xs normal-case tracking-normal text-muted-foreground hover:text-gold disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            Remove
+                          </button>
+                        </span>
+                      </label>
 
-                      <label className="block text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                      <label className="md:col-span-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground">
                         Relation type
                         <select
-                          value={member.relationType || "relative"}
+                          value={
+                            member.relatedMemberId
+                              ? member.relationType || "relative"
+                              : ""
+                          }
+                          disabled={!member.relatedMemberId}
                           onChange={(event) =>
                             updateMember(generation.id, member.id, {
                               relationType: event.target
                                 .value as FamilyMember["relationType"],
                             })
                           }
-                          className="mt-1 h-10 w-full rounded-[6px] border border-border bg-card px-2 text-sm normal-case tracking-normal text-foreground outline-none focus:border-gold"
+                          className="mt-1 h-10 w-full rounded-[6px] border border-border bg-card px-2 text-sm normal-case tracking-normal text-foreground outline-none focus:border-gold disabled:cursor-not-allowed disabled:opacity-50"
                         >
+                          <option value="">Select related person first</option>
                           <option value="relative">Relative of</option>
                           <option value="parent">Parent of</option>
                           <option value="child">Child of</option>
@@ -833,13 +1011,16 @@ export default function FamilyTreeAdmin() {
                         </select>
                       </label>
 
-                      <label className="block text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                      <label className="md:col-span-2 block text-xs uppercase tracking-[0.16em] text-muted-foreground">
                         Related to
                         <select
                           value={member.relatedMemberId || ""}
                           onChange={(event) =>
                             updateMember(generation.id, member.id, {
                               relatedMemberId: event.target.value || undefined,
+                              relationType: event.target.value
+                                ? member.relationType || "relative"
+                                : undefined,
                             })
                           }
                           className="mt-1 h-10 w-full rounded-[6px] border border-border bg-card px-2 text-sm normal-case tracking-normal text-foreground outline-none focus:border-gold"
@@ -855,7 +1036,7 @@ export default function FamilyTreeAdmin() {
                         </select>
                       </label>
 
-                      <div className="flex flex-wrap items-end gap-2">
+                      <div className="md:col-span-2 flex flex-wrap items-end gap-2">
                         <select
                           value={generation.id}
                           onChange={(event) =>
@@ -879,7 +1060,9 @@ export default function FamilyTreeAdmin() {
                         </select>
                         <button
                           type="button"
-                          onClick={() => moveMember(generation.id, memberIndex, -1)}
+                          onClick={() =>
+                            moveMember(generation.id, memberIndex, -1)
+                          }
                           className="h-10 w-10 rounded-full border border-border bg-card text-muted-foreground hover:text-gold disabled:opacity-35"
                           disabled={memberIndex === 0}
                           aria-label="Move member left"
@@ -888,9 +1071,13 @@ export default function FamilyTreeAdmin() {
                         </button>
                         <button
                           type="button"
-                          onClick={() => moveMember(generation.id, memberIndex, 1)}
+                          onClick={() =>
+                            moveMember(generation.id, memberIndex, 1)
+                          }
                           className="h-10 w-10 rounded-full border border-border bg-card text-muted-foreground hover:text-gold disabled:opacity-35"
-                          disabled={memberIndex === generation.members.length - 1}
+                          disabled={
+                            memberIndex === generation.members.length - 1
+                          }
                           aria-label="Move member right"
                         >
                           <ArrowDown className="mx-auto h-4 w-4" />

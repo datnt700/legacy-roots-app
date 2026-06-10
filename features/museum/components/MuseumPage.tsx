@@ -432,7 +432,7 @@ function TimelinePanel({
             <div>
               <p className="font-serif text-lg text-[#F7EAD7]">Event Media</p>
               <p className="mt-1 text-[11px] leading-5 text-[#BCA77B]">
-                Linked by event_media for this selected timeline event.
+                Linked by media.entity_type and media.entity_id for this event.
               </p>
             </div>
             <span className="shrink-0 text-[11px] uppercase tracking-[0.22em] text-[#BCA77B]">

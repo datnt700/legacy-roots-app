@@ -10,26 +10,35 @@ import {
 export const dynamic = "force-dynamic";
 
 const DEFAULT_FAMILY_SLUG = "legacy-roots";
-const GENERATION_NAMES = [
-  "FIRST GENERATION",
-  "SECOND GENERATION",
-  "THIRD GENERATION",
-  "FOURTH GENERATION",
-  "FIFTH GENERATION",
-  "SIXTH GENERATION",
-  "SEVENTH GENERATION",
-  "EIGHTH GENERATION",
-  "NINTH GENERATION",
-  "TENTH GENERATION",
-];
 const ADMIN_ROLES = new Set(["admin", "super_admin"]);
+const VALID_RELATION_TYPES = new Set([
+  "parent",
+  "child",
+  "spouse",
+  "sibling",
+  "relative",
+]);
+const VALID_GENDERS = new Set(["male", "female", "other"]);
+
+type FamilyRow = {
+  id: string;
+  root_person_id: string | null;
+};
+
+type GenerationRow = {
+  id: string;
+  label: string;
+  sort_order: number | null;
+};
 
 type PersonRow = {
   id: string;
+  generation_id: string | null;
   full_name: string;
-  title: string | null;
-  generation: number | null;
+  display_title: string | null;
+  gender: string | null;
   avatar_url: string | null;
+  sort_order: number | null;
 };
 
 type ExistingPersonImageRow = {
@@ -37,15 +46,15 @@ type ExistingPersonImageRow = {
 };
 
 type RelationshipRow = {
-  person_id: string;
-  related_person_id: string;
+  from_person_id: string;
+  to_person_id: string;
   relation_type: string;
 };
 
 type RelationshipInsertRow = {
   family_id: string;
-  person_id: string;
-  related_person_id: string;
+  from_person_id: string;
+  to_person_id: string;
   relation_type: NonNullable<FamilyMember["relationType"]>;
 };
 
@@ -54,13 +63,9 @@ type UserRoleRow = {
 };
 
 function isUuid(value: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(
     value,
   );
-}
-
-function generationLabel(index: number) {
-  return GENERATION_NAMES[index] ?? `GENERATION ${index + 1}`;
 }
 
 function slugify(value: string) {
@@ -70,6 +75,18 @@ function slugify(value: string) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 64);
+}
+
+function normalizeRelationType(value: unknown): NonNullable<FamilyMember["relationType"]> {
+  const relationType = typeof value === "string" ? value.toLowerCase() : "";
+  return VALID_RELATION_TYPES.has(relationType)
+    ? (relationType as NonNullable<FamilyMember["relationType"]>)
+    : "relative";
+}
+
+function normalizeGender(value: unknown): FamilyMember["gender"] {
+  const gender = typeof value === "string" ? value.toLowerCase() : "";
+  return VALID_GENDERS.has(gender) ? (gender as NonNullable<FamilyMember["gender"]>) : null;
 }
 
 function isRelationshipInsertRow(
@@ -126,7 +143,9 @@ async function requireAdmin(request: Request) {
     };
   }
 
-  const role = String(((userProfile as UserRoleRow | null)?.role ?? "")).toLowerCase();
+  const role = String(
+    ((userProfile as UserRoleRow | null)?.role ?? ""),
+  ).toLowerCase();
 
   if (!ADMIN_ROLES.has(role)) {
     return {
@@ -146,7 +165,7 @@ async function getOrCreateFamily() {
 
   const { data: existingFamily, error: existingError } = await supabase
     .from("families")
-    .select("id")
+    .select("id,root_person_id")
     .eq("slug", slug)
     .maybeSingle();
 
@@ -155,7 +174,7 @@ async function getOrCreateFamily() {
   }
 
   if (existingFamily?.id) {
-    return existingFamily.id as string;
+    return existingFamily as FamilyRow;
   }
 
   const { data: owner, error: ownerError } = await supabase
@@ -180,17 +199,50 @@ async function getOrCreateFamily() {
       slug,
       is_public: true,
     })
-    .select("id")
+    .select("id,root_person_id")
     .single();
 
   if (createError) {
     throw new Error(createError.message);
   }
 
-  return createdFamily.id as string;
+  return createdFamily as FamilyRow;
+}
+
+function fallbackRootPersonId(
+  family: FamilyRow,
+  generations: GenerationRow[],
+  persons: PersonRow[],
+) {
+  if (family.root_person_id && persons.some((person) => person.id === family.root_person_id)) {
+    return family.root_person_id;
+  }
+
+  const generationOrder = new Map(
+    generations.map((generation, index) => [
+      generation.id,
+      generation.sort_order ?? index + 1,
+    ]),
+  );
+
+  return (
+    [...persons].sort((a, b) => {
+      const generationDiff =
+        (generationOrder.get(a.generation_id ?? "") ?? Number.MAX_SAFE_INTEGER) -
+        (generationOrder.get(b.generation_id ?? "") ?? Number.MAX_SAFE_INTEGER);
+
+      if (generationDiff !== 0) {
+        return generationDiff;
+      }
+
+      return (a.sort_order ?? 0) - (b.sort_order ?? 0);
+    })[0]?.id ?? null
+  );
 }
 
 function toFamilyTree(
+  family: FamilyRow,
+  generations: GenerationRow[],
   persons: PersonRow[],
   relationships: RelationshipRow[],
 ): FamilyTreeData {
@@ -199,30 +251,51 @@ function toFamilyTree(
   }
 
   const relationshipByPersonId = new Map(
-    relationships.map((relationship) => [relationship.person_id, relationship]),
+    relationships.map((relationship) => [
+      relationship.from_person_id,
+      relationship,
+    ]),
   );
-  const generationNumbers = [
-    ...new Set(persons.map((person) => person.generation ?? 1)),
-  ].sort((a, b) => a - b);
+  const sortedGenerations = [...generations].sort(
+    (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0),
+  );
+  const rootPersonId = fallbackRootPersonId(family, sortedGenerations, persons);
 
   return {
-    generations: generationNumbers.map((generationNumber, index) => ({
-      id: `generation-${generationNumber}`,
-      label: generationLabel(index),
+    rootPersonId,
+    generations: sortedGenerations.map((generation, generationIndex) => ({
+      id: generation.id,
+      label: generation.label,
+      sortOrder: generation.sort_order ?? generationIndex + 1,
       members: persons
-        .filter((person) => (person.generation ?? 1) === generationNumber)
-        .map((person) => {
+        .filter((person) => person.generation_id === generation.id)
+        .sort((a, b) => {
+          if (a.id === rootPersonId) {
+            return -1;
+          }
+
+          if (b.id === rootPersonId) {
+            return 1;
+          }
+
+          return (a.sort_order ?? 0) - (b.sort_order ?? 0);
+        })
+        .map((person, personIndex) => {
           const relationship = relationshipByPersonId.get(person.id);
-          const label = person.title || "Member";
+          const displayTitle = person.display_title || "Member";
 
           return {
             id: person.id,
             name: person.full_name,
-            role: label,
-            relationship: label,
-            relationType: relationship?.relation_type as FamilyMember["relationType"],
-            relatedMemberId: relationship?.related_person_id,
+            role: displayTitle,
+            gender: normalizeGender(person.gender),
+            relationship: displayTitle,
+            relationType: relationship
+              ? normalizeRelationType(relationship.relation_type)
+              : undefined,
+            relatedMemberId: relationship?.to_person_id,
             image: person.avatar_url || undefined,
+            sortOrder: person.sort_order ?? personIndex + 1,
           };
         }),
     })),
@@ -258,6 +331,7 @@ async function withDisplayImageUrls(
   tree: FamilyTreeData,
 ) {
   return {
+    ...tree,
     generations: await Promise.all(
       tree.generations.map(async (generation) => ({
         ...generation,
@@ -326,13 +400,27 @@ async function removeUnusedStorageImages(
 export async function GET() {
   try {
     const supabase = getSupabase();
-    const familyId = await getOrCreateFamily();
+    const family = await getOrCreateFamily();
+
+    const { data: generations, error: generationsError } = await supabase
+      .from("generations")
+      .select("id,label,sort_order")
+      .eq("family_id", family.id)
+      .order("sort_order", { ascending: true })
+      .order("created_at", { ascending: true });
+
+    if (generationsError) {
+      return NextResponse.json(
+        { error: generationsError.message },
+        { status: 500 },
+      );
+    }
 
     const { data: persons, error: personsError } = await supabase
       .from("persons")
-      .select("id,full_name,title,generation,avatar_url")
-      .eq("family_id", familyId)
-      .order("generation", { ascending: true })
+      .select("id,generation_id,full_name,display_title,gender,avatar_url,sort_order")
+      .eq("family_id", family.id)
+      .order("sort_order", { ascending: true })
       .order("created_at", { ascending: true });
 
     if (personsError) {
@@ -341,8 +429,8 @@ export async function GET() {
 
     const { data: relationships, error: relationshipsError } = await supabase
       .from("relationships")
-      .select("person_id,related_person_id,relation_type")
-      .eq("family_id", familyId);
+      .select("from_person_id,to_person_id,relation_type")
+      .eq("family_id", family.id);
 
     if (relationshipsError) {
       return NextResponse.json(
@@ -352,9 +440,11 @@ export async function GET() {
     }
 
     const tree = toFamilyTree(
-        (persons ?? []) as PersonRow[],
-        (relationships ?? []) as RelationshipRow[],
-      );
+      family,
+      (generations ?? []) as GenerationRow[],
+      (persons ?? []) as PersonRow[],
+      (relationships ?? []) as RelationshipRow[],
+    );
 
     return NextResponse.json({
       data: await withDisplayImageUrls(supabase, tree),
@@ -378,7 +468,7 @@ export async function PUT(request: Request) {
     }
 
     const supabase = getSupabase();
-    const familyId = await getOrCreateFamily();
+    const family = await getOrCreateFamily();
     const body = (await request.json()) as { data?: FamilyTreeData };
     const tree = body.data;
 
@@ -386,11 +476,10 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: "Invalid family tree." }, { status: 400 });
     }
 
-    const idMap = new Map<string, string>();
     const { data: existingPersons, error: existingPersonsError } = await supabase
       .from("persons")
       .select("avatar_url")
-      .eq("family_id", familyId);
+      .eq("family_id", family.id);
 
     if (existingPersonsError) {
       return NextResponse.json(
@@ -399,18 +488,34 @@ export async function PUT(request: Request) {
       );
     }
 
+    const generationIdMap = new Map<string, string>();
+    const personIdMap = new Map<string, string>();
+    const generationRows = tree.generations.map((generation, generationIndex) => {
+      const id = isUuid(generation.id) ? generation.id : crypto.randomUUID();
+      generationIdMap.set(generation.id, id);
+
+      return {
+        id,
+        family_id: family.id,
+        label: generation.label.trim() || `Generation ${generationIndex + 1}`,
+        sort_order: generation.sortOrder ?? generationIndex + 1,
+      };
+    });
+
     const personRows = tree.generations.flatMap((generation, generationIndex) =>
-      generation.members.map((member) => {
+      generation.members.map((member, memberIndex) => {
         const id = isUuid(member.id) ? member.id : crypto.randomUUID();
-        idMap.set(member.id, id);
+        personIdMap.set(member.id, id);
 
         return {
           id,
-          family_id: familyId,
+          family_id: family.id,
+          generation_id: generationIdMap.get(generation.id) ?? null,
           full_name: member.name.trim() || "Unnamed Member",
-          title: (member.relationship || member.role || "Member").trim(),
-          generation: generationIndex + 1,
+          display_title: (member.relationship || member.role || "Member").trim(),
+          gender: normalizeGender(member.gender),
           avatar_url: getCanonicalImageUrl(supabase, member.image),
+          sort_order: member.sortOrder ?? memberIndex + 1,
           slug: slugify(`${member.name}-${id}`) || id,
         };
       }),
@@ -419,24 +524,28 @@ export async function PUT(request: Request) {
     const relationshipRows = tree.generations.flatMap((generation) =>
       generation.members
         .map((member) => {
-          const personId = idMap.get(member.id);
-          const relatedPersonId = member.relatedMemberId
-            ? idMap.get(member.relatedMemberId) ?? member.relatedMemberId
+          const fromPersonId = personIdMap.get(member.id);
+          const toPersonId = member.relatedMemberId
+            ? personIdMap.get(member.relatedMemberId) ?? member.relatedMemberId
             : null;
 
-          if (!personId || !relatedPersonId || !isUuid(relatedPersonId)) {
+          if (!fromPersonId || !toPersonId || !isUuid(toPersonId)) {
             return null;
           }
 
           return {
-            family_id: familyId,
-            person_id: personId,
-            related_person_id: relatedPersonId,
-            relation_type: member.relationType || "relative",
+            family_id: family.id,
+            from_person_id: fromPersonId,
+            to_person_id: toPersonId,
+            relation_type: normalizeRelationType(member.relationType),
           };
         })
         .filter(isRelationshipInsertRow),
     );
+
+    const rootPersonId = tree.rootPersonId
+      ? personIdMap.get(tree.rootPersonId) ?? tree.rootPersonId
+      : personRows[0]?.id ?? null;
 
     const cleanupError = await removeUnusedStorageImages(
       supabase,
@@ -453,10 +562,12 @@ export async function PUT(request: Request) {
       );
     }
 
+    await supabase.from("families").update({ root_person_id: null }).eq("id", family.id);
+
     const { error: deleteRelationshipsError } = await supabase
       .from("relationships")
       .delete()
-      .eq("family_id", familyId);
+      .eq("family_id", family.id);
 
     if (deleteRelationshipsError) {
       return NextResponse.json(
@@ -468,13 +579,38 @@ export async function PUT(request: Request) {
     const { error: deletePersonsError } = await supabase
       .from("persons")
       .delete()
-      .eq("family_id", familyId);
+      .eq("family_id", family.id);
 
     if (deletePersonsError) {
       return NextResponse.json(
         { error: deletePersonsError.message },
         { status: 500 },
       );
+    }
+
+    const { error: deleteGenerationsError } = await supabase
+      .from("generations")
+      .delete()
+      .eq("family_id", family.id);
+
+    if (deleteGenerationsError) {
+      return NextResponse.json(
+        { error: deleteGenerationsError.message },
+        { status: 500 },
+      );
+    }
+
+    if (generationRows.length) {
+      const { error: insertGenerationsError } = await supabase
+        .from("generations")
+        .insert(generationRows);
+
+      if (insertGenerationsError) {
+        return NextResponse.json(
+          { error: insertGenerationsError.message },
+          { status: 500 },
+        );
+      }
     }
 
     if (personRows.length) {
@@ -503,18 +639,36 @@ export async function PUT(request: Request) {
       }
     }
 
+    if (rootPersonId && isUuid(rootPersonId)) {
+      const { error: rootError } = await supabase
+        .from("families")
+        .update({ root_person_id: rootPersonId })
+        .eq("id", family.id);
+
+      if (rootError) {
+        return NextResponse.json({ error: rootError.message }, { status: 500 });
+      }
+    }
+
     const normalizedTree: FamilyTreeData = {
+      rootPersonId,
       generations: tree.generations.map((generation, generationIndex) => ({
-        id: `generation-${generationIndex + 1}`,
-        label: generationLabel(generationIndex),
-        members: generation.members.map((member) => ({
+        id: generationIdMap.get(generation.id) ?? generation.id,
+        label: generation.label,
+        sortOrder: generation.sortOrder ?? generationIndex + 1,
+        members: generation.members.map((member, memberIndex) => ({
           ...member,
-          id: idMap.get(member.id) ?? member.id,
+          id: personIdMap.get(member.id) ?? member.id,
           role: member.relationship || member.role || "Member",
+          gender: normalizeGender(member.gender),
           relationship: member.relationship || member.role || "Member",
           relatedMemberId: member.relatedMemberId
-            ? idMap.get(member.relatedMemberId) ?? member.relatedMemberId
+            ? personIdMap.get(member.relatedMemberId) ?? member.relatedMemberId
             : undefined,
+          relationType: member.relatedMemberId
+            ? normalizeRelationType(member.relationType)
+            : undefined,
+          sortOrder: member.sortOrder ?? memberIndex + 1,
         })),
       })),
     };

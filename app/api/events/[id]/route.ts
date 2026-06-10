@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { validateEventPayload, type EventPayload } from "@/features/events/validators";
 import { getSupabase } from "@/lib/supabase";
-import { validatePositiveInteger } from "@/lib/validation";
 
 export async function PATCH(
   request: Request,
@@ -9,7 +8,7 @@ export async function PATCH(
 ) {
   const supabase = getSupabase();
   const { id: rawId } = await context.params;
-  const id = validatePositiveInteger(rawId);
+  const id = rawId?.trim();
 
   if (!id) {
     return NextResponse.json({ error: "Invalid event id." }, { status: 400 });
@@ -26,7 +25,7 @@ export async function PATCH(
     .from("events")
     .update(validated.data)
     .eq("id", id)
-    .select("id,title,description,timeline_year,created_at")
+    .select("id,title,description,timeline_year,created_at,family_id")
     .single();
 
   if (error) {
@@ -42,20 +41,17 @@ export async function DELETE(
 ) {
   const supabase = getSupabase();
   const { id: rawId } = await context.params;
-  const id = validatePositiveInteger(rawId);
+  const id = rawId?.trim();
 
   if (!id) {
     return NextResponse.json({ error: "Invalid event id." }, { status: 400 });
   }
 
-  const { error: linkError } = await supabase
-    .from("event_media")
+  await supabase
+    .from("media")
     .delete()
-    .eq("event_id", id);
-
-  if (linkError) {
-    return NextResponse.json({ error: linkError.message }, { status: 500 });
-  }
+    .eq("entity_type", "event")
+    .eq("entity_id", id);
 
   const { error } = await supabase.from("events").delete().eq("id", id);
 

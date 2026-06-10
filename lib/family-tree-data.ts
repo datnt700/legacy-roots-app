@@ -2,19 +2,23 @@ export type FamilyMember = {
   id: string;
   name: string;
   role: string;
+  gender?: "male" | "female" | "other" | null;
   relationship?: string;
   relationType?: "parent" | "child" | "spouse" | "sibling" | "relative";
   relatedMemberId?: string;
   image?: string;
+  sortOrder?: number;
 };
 
 export type FamilyGeneration = {
   id: string;
   label: string;
   members: FamilyMember[];
+  sortOrder?: number;
 };
 
 export type FamilyTreeData = {
+  rootPersonId?: string | null;
   generations: FamilyGeneration[];
 };
 
@@ -26,11 +30,13 @@ export const defaultFamilyTree: FamilyTreeData = {
     {
       id: "first-generation",
       label: "FIRST GENERATION",
+      sortOrder: 1,
       members: [
         {
           id: "gf",
           name: "Mohan Sharma",
           role: "Grandfather",
+          gender: "male",
           relationship: "Grandfather",
           image: "/portraits/grandfather.png",
         },
@@ -38,6 +44,7 @@ export const defaultFamilyTree: FamilyTreeData = {
           id: "gm",
           name: "Savitri Sharma",
           role: "Grandmother",
+          gender: "female",
           relationship: "Grandmother",
           relationType: "spouse",
           relatedMemberId: "gf",
@@ -48,11 +55,13 @@ export const defaultFamilyTree: FamilyTreeData = {
     {
       id: "second-generation",
       label: "SECOND GENERATION",
+      sortOrder: 2,
       members: [
         {
           id: "fa",
           name: "Rajesh Sharma",
           role: "Father",
+          gender: "male",
           relationship: "Father",
           relationType: "child",
           relatedMemberId: "gf",
@@ -62,6 +71,7 @@ export const defaultFamilyTree: FamilyTreeData = {
           id: "mo",
           name: "Anita Sharma",
           role: "Mother",
+          gender: "female",
           relationship: "Mother",
           relationType: "spouse",
           relatedMemberId: "fa",
@@ -72,11 +82,13 @@ export const defaultFamilyTree: FamilyTreeData = {
     {
       id: "third-generation",
       label: "THIRD GENERATION",
+      sortOrder: 3,
       members: [
         {
           id: "so",
           name: "Aarav Sharma",
           role: "Son",
+          gender: "male",
           relationship: "Son",
           relationType: "child",
           relatedMemberId: "fa",
@@ -86,6 +98,7 @@ export const defaultFamilyTree: FamilyTreeData = {
           id: "da",
           name: "Diya Sharma",
           role: "Daughter",
+          gender: "female",
           relationship: "Daughter",
           relationType: "sibling",
           relatedMemberId: "so",
@@ -95,6 +108,7 @@ export const defaultFamilyTree: FamilyTreeData = {
           id: "add",
           name: "Add Member",
           role: "Member",
+          gender: null,
           relationship: "Member",
         },
       ],
@@ -125,18 +139,22 @@ export function parseFamilyTree(rawValue: string | null): FamilyTreeData {
       generations: parsed.generations.map((generation, generationIndex) => ({
         id: generation.id || createFamilyId(`generation-${generationIndex}`),
         label: generation.label || `GENERATION ${generationIndex + 1}`,
+        sortOrder: generation.sortOrder ?? generationIndex + 1,
         members: Array.isArray(generation.members)
           ? generation.members.map((member, memberIndex) => ({
               id: member.id || createFamilyId(`member-${memberIndex}`),
               name: member.name || "Unnamed Member",
               role: member.role || "Member",
+              gender: member.gender,
               relationship: member.relationship || member.role || "Member",
               relationType: member.relationType,
               relatedMemberId: member.relatedMemberId,
               image: member.image,
+              sortOrder: member.sortOrder ?? memberIndex + 1,
             }))
           : [],
       })),
+      rootPersonId: parsed.rootPersonId ?? null,
     };
   } catch {
     return defaultFamilyTree;
